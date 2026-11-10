@@ -1,0 +1,24 @@
+SUPPORT LOCAL DE RÉINSTALLATION ASUS TRANSFORMER 3 T305CA
+Image de base Linux Mint 22.3 Xfce 64 bits. Personnalisation non officielle.
+
+1. Démarrer l’ISO puis installer Mint normalement. Ne pas lancer les
+   correctifs dans la session live. Ils ciblent le système déjà installé.
+2. Démarrer le Mint installé. Depuis le support, copier le dossier
+   T305CA sur le disque. Ouvrir un terminal dans la copie et exécuter :
+
+       bash installer-correctifs.sh systeme
+
+3. Redémarrer sur l’entrée « Linux Mint — ASUS T305CA, deux caméras ».
+   Dans la session Xfce, revenir dans le dossier copié et exécuter :
+
+       bash installer-correctifs.sh session
+
+Le kit contient le noyau 7.0.0-42-generic et les correctifs validés des
+caméras et de leurs voyants, du son, du micro, du clavier, du pavé
+tactile et du contrôle matériel au démarrage. Les caméras nécessitent
+Secure Boot désactivé pour les modules non signés. Les scripts ciblent
+une installation avec / et /boot sur la même partition ext4. APT peut
+avoir besoin d’Internet pour les dépendances complémentaires.
+
+Le support n’active aucune restauration automatiquement. Conserver
+une sauvegarde de ses documents avant toute réinstallation de Mint.

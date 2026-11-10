@@ -35,3 +35,15 @@ Le script suivant s’applique si l’installation démarre déjà sur l’entr�
 ```sh
 sudo bash demarrage/masquer-grub.sh
 ```
+
+## Construire le support de réinstallation
+
+Le dossier [iso](iso/) permet d’ajouter le kit ASUS à une image d’installation officielle de Linux Mint 22.3 Xfce. Cette reconstruction est destinée à un usage local et requiert l’image Mint vérifiée ainsi que le dossier de sauvegarde T305CA validé, avec ses archives, ses scripts et ses paquets. Le dépôt contient la recette de construction.
+
+```sh
+sudo apt install xorriso
+bash iso/construire.sh linuxmint-22.3-xfce-64bit.iso \
+  /chemin/vers/le/kit-valide T305CA-restauration.iso
+```
+
+Le script vérifie la somme SHA-256 de l’ISO source et les sommes du kit. Il préserve l’amorçage de l’image officielle et y ajoute le dossier `T305CA`. Après l’installation standard de Mint, suivre `T305CA/LIRE-MOI.txt` pour appliquer les correctifs. L’application à un T305CA physique se vérifie ensuite sur le matériel.

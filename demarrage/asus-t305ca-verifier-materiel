@@ -1,0 +1,94 @@
+#!/bin/bash
+set -u
+[[ $(</sys/class/dmi/id/product_name) == T305CA ]] || exit 0
+alerts=0
+
+check() {
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        printf 'OK | %s\n' "$label"
+    else
+        printf 'À VÉRIFIER | %s\n' "$label"
+        ((alerts += 1))
+    fi
+}
+
+usb_present() {
+    local path
+    for path in /sys/bus/usb/devices/*; do
+        if [[ -r "$path/idVendor" && -r "$path/idProduct" &&
+              $(<"$path/idVendor") == "$1" && $(<"$path/idProduct") == "$2" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+display_ready() {
+    grep -lFx connected /sys/class/drm/card*-eDP-*/status >/dev/null &&
+        [[ -r /sys/class/backlight/intel_backlight/actual_brightness ]]
+}
+
+disk_ready() {
+    local options
+    options=$(findmnt -n -o OPTIONS /) || return 1
+    [[ -b /dev/sda && ",$options," == *,rw,* ]]
+}
+
+audio_ready() {
+    [[ -c /dev/snd/pcmC0D0p && -c /dev/snd/pcmC0D0c ]] &&
+        grep -q 'Codec: Realtek ALC274' /proc/asound/card0/codec#0
+}
+
+sensor_ready() {
+    local node name value
+    for node in /sys/bus/iio/devices/iio:device*; do
+        [[ -r "$node/name" ]] || continue
+        name=$(<"$node/name")
+        [[ "$name" == "$1" ]] || continue
+        if [[ "$1" == acpi-als ]]; then
+            read -r value <"$node/in_illuminance_input" && [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]
+            return
+        fi
+        return 0
+    done
+    return 1
+}
+
+cpu_memory_ready() {
+    grep -q '^processor[[:space:]]*:' /proc/cpuinfo && grep -q '^MemTotal:' /proc/meminfo
+}
+
+printf 'Contrôle des périphériques ASUS T305CA avant LightDM.\n'
+check 'Processeur et mémoire détectés' cpu_memory_ready
+check 'SSD SATA et partition système accessible en écriture' disk_ready
+check 'Contrôleur USB' test -L /sys/bus/pci/devices/0000:00:14.0/driver
+check 'Circuit graphique Intel' test -L /sys/bus/pci/devices/0000:00:02.0/driver
+check 'Écran interne et commande de rétroéclairage' display_ready
+check 'Batterie présente' grep -qx 1 /sys/class/power_supply/BAT0/present
+check 'Détection de l’alimentation secteur' test -r /sys/class/power_supply/AC0/online
+if usb_present 0b05 184a; then
+    check 'Clavier et pavé tactile du dock' /usr/local/libexec/asus-t305ca-reprendre-clavier --check
+else
+    echo 'INFO | Clavier détaché au moment du contrôle'
+fi
+check 'Écran tactile ELAN' grep -Fxq 'N: Name="ELAN22BF:00 04F3:22BF"' /proc/bus/input/devices
+check 'Interface stylet ELAN' grep -Fxq 'N: Name="ELAN22BF:00 04F3:22BF Stylus"' /proc/bus/input/devices
+check 'Capteur de lumière ambiante, mesure lisible' sensor_ready acpi-als
+check 'Accéléromètre' sensor_ready accel_3d
+check 'Gyroscope' sensor_ready gyro_3d
+check 'Codec Realtek et interfaces des haut-parleurs et du micro' audio_ready
+check 'Carte Wi-Fi Intel détectée' test -e /sys/class/net/wlp58s0
+check 'Contrôleur Bluetooth détecté' test -e /sys/class/bluetooth/hci0
+check 'Lecteur d’empreintes ELAN détecté' usb_present 04f3 0903
+cameras=$(timeout 4 env LIBCAMERA_LOG_LEVELS='*:ERROR' \
+    LD_LIBRARY_PATH=/opt/t305ca-libcamera/lib \
+    LIBCAMERA_IPA_MODULE_PATH=/opt/t305ca-libcamera/ipa \
+    LIBCAMERA_IPA_CONFIG_PATH=/opt/t305ca-libcamera/config \
+    /usr/bin/cam -l 2>/dev/null) || cameras=
+check 'Caméra avant reconnue par libcamera' grep -q 'CAM3' <<<"$cameras"
+check 'Caméra arrière reconnue par libcamera' grep -q 'CAM6' <<<"$cameras"
+check 'Pilote du mécanisme de mise au point arrière' test -L /sys/bus/i2c/devices/i2c-OVTID850:00-VCM/driver
+
+printf 'BILAN | %d point(s) à vérifier.\n' "$alerts"

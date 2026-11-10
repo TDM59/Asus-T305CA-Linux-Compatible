@@ -1,0 +1,13 @@
+[Unit]
+Description=Contrôler les périphériques de l’ASUS T305CA avant l’écran de connexion
+After=asus-t305ca-reprendre-clavier.service t305ca-camera-avant.service t305ca-camera-test.service t305ca-als.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/asus-t305ca-verifier-materiel
+TimeoutStartSec=8s
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Récupérer les interfaces USB du clavier ASUS T305CA
+After=systemd-udev-trigger.service
+Before=display-manager.service
+ConditionPathExists=/sys/class/dmi/id/product_name
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/local/libexec/asus-t305ca-reprendre-clavier
+ExecStop=-/usr/local/libexec/asus-t305ca-reprendre-clavier --shutdown
+TimeoutStartSec=9s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=graphical.target

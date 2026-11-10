@@ -1,0 +1,29 @@
+#!/bin/bash
+set -eu
+
+journal=$(journalctl -b -u asus-t305ca-verifier-materiel.service -q -o cat --no-pager 2>/dev/null) || journal=
+message=$(awk '
+    /^Contrôle des périphériques ASUS T305CA / {
+        bilan = 0
+        alertes = ""
+    }
+    /^À VÉRIFIER \| / {
+        sub(/^À VÉRIFIER \| /, "")
+        alertes = alertes "• " $0 "\n"
+    }
+    /^BILAN \| [0-9]+ point\(s\) à vérifier\.$/ { bilan = 1 }
+    END {
+        if (!bilan) {
+            print "Le contrôle matériel n’a pas produit de bilan complet pour ce démarrage."
+            if (alertes != "") print ""
+        }
+        if (alertes != "") printf "Périphériques ou fonctions à vérifier :\n\n%s", alertes
+    }
+' <<<"$journal")
+
+if [[ -n "$message" ]]; then
+    logger -t t305ca-alerte-materiel -- 'Contrôle du démarrage : affichage de l’alerte.' || true
+    exec zenity --warning --title='ASUS T305CA — contrôle du démarrage' \
+        --text="$message" --no-markup --width=470
+fi
+logger -t t305ca-alerte-materiel -- 'Contrôle du démarrage : bilan normal, aucune alerte.' || true

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Alerte du contrôle matériel ASUS
+Comment=Signaler un périphérique manquant au démarrage
+Exec=/usr/local/bin/t305ca-alerte-materiel
+OnlyShowIn=XFCE;
+NoDisplay=true
+Terminal=false

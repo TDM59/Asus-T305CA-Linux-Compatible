@@ -1,0 +1,75 @@
+#!/bin/bash
+set -eu
+dock=/sys/bus/usb/devices/1-7
+interfaces=("$dock:1.0" "$dock:1.1")
+usbhid=/sys/bus/usb/drivers/usbhid
+
+est_clavier_asus() {
+    [[ -r "$dock/idVendor" && -r "$dock/idProduct" ]] &&
+        [[ $(<"$dock/idVendor") == 0b05 && $(<"$dock/idProduct") == 184a ]]
+}
+
+interface_prete() {
+    local iface="$1"
+    [[ -L "$iface/driver" ]] &&
+        compgen -G "$iface/0003:0B05:184A.*/input/input*/event*" >/dev/null
+}
+
+clavier_pret() {
+    interface_prete "${interfaces[0]}" && interface_prete "${interfaces[1]}"
+}
+
+relancer_pilote() {
+    local iface
+    for iface in "${interfaces[@]}"; do
+        if [[ -r "$iface/bInterfaceClass" && $(<"$iface/bInterfaceClass") == 03 &&
+              ! -L "$iface/driver" ]]; then
+            printf '%s' "${iface##*/}" >"$usbhid/bind" || true
+        fi
+    done
+}
+
+[[ $(</sys/class/dmi/id/product_name) == T305CA ]] || exit 0
+if ! est_clavier_asus; then
+    echo 'Clavier ASUS détaché.'
+    exit 0
+fi
+
+if [[ ${1:-} == --shutdown ]]; then
+    if [[ $(/usr/bin/systemctl is-system-running || true) == stopping ]]; then
+        /usr/bin/flock -w 2 /run/asus-t305ca-backlight.lock             /usr/bin/python3 -I /usr/local/libexec/asus-t305ca-backlight.py 0
+    fi
+    exit 0
+fi
+
+if clavier_pret; then
+    echo 'Clavier et pavé tactile ASUS déjà initialisés.'
+    exit 0
+fi
+if [[ ${1:-} == --check ]]; then
+    echo 'Le clavier ASUS est détecté mais ses interfaces ne sont pas prêtes.'
+    exit 1
+fi
+
+echo 'Interfaces HID incomplètes, nouvelle tentative de chargement.'
+relancer_pilote
+sleep 0.5
+if clavier_pret; then
+    echo 'Clavier et pavé tactile ASUS récupérés par relance du pilote.'
+    exit 0
+fi
+
+if ! est_clavier_asus; then exit 0; fi
+printf -v adresse '%03d/%03d' "$(<"$dock/busnum")" "$(<"$dock/devnum")"
+echo "Réinitialisation USB du clavier ASUS ($adresse)."
+/usr/bin/timeout 3 /usr/bin/usbreset "$adresse" || true
+sleep 0.5
+if ! est_clavier_asus; then exit 0; fi
+relancer_pilote
+sleep 0.5
+if clavier_pret; then
+    echo 'Clavier et pavé tactile ASUS récupérés après réinitialisation USB.'
+    exit 0
+fi
+echo 'Le clavier ASUS ne répond toujours pas après les tentatives de récupération.' >&2
+exit 1

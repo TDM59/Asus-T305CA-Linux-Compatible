@@ -1,0 +1,8 @@
+[Unit]
+Description=Mode tablette ASUS T305CA dans la session Xfce
+ConditionEnvironment=DISPLAY
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/lib/t305ca/t305ca-mode-tablette.py
+Restart=on-failure

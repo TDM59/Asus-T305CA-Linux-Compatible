@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Mode tablette ASUS T305CA
+Exec=systemctl --user start t305ca-mode-tablette.service
+OnlyShowIn=XFCE;
+Terminal=false

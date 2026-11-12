@@ -1,0 +1,10 @@
+[Unit]
+Description=Luminosité automatique de l’écran ASUS T305CA
+ConditionPathExists=/sys/class/backlight/intel_backlight
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/lib/t305ca/t305ca-luminosite-auto.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

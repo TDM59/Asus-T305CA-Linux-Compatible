@@ -1,7 +1,9 @@
 #!/usr/bin/python3
 import json
 import os
+import signal
 import subprocess
+from time import monotonic
 from pathlib import Path
 
 import pyudev
@@ -91,6 +93,7 @@ def apply_panel(tablet):
 
 
 def apply_orientation(orientation):
+    started = monotonic()
     monitors = subprocess.check_output(["xrandr", "--listactivemonitors"], text=True)
     outputs = [line.split()[-1] for line in monitors.splitlines()[1:]]
     if DISPLAY not in outputs:
@@ -101,16 +104,16 @@ def apply_orientation(orientation):
     rotation, coefficients = ROTATIONS[orientation]
     matrix = [f"{value}.0" for value in (*coefficients, 0, 0, 1)]
     subprocess.run(["xrandr", "--current", "--output", DISPLAY, "--rotate", rotation], check=True)
-    state = Path(GLib.get_user_runtime_dir()) / "t305ca-display-rotation"
-    temporary = state.with_suffix(".tmp")
-    temporary.write_text(rotation + "\n")
-    temporary.replace(state)
     subprocess.run(["xinput", "set-prop", TOUCH, "Coordinate Transformation Matrix", *matrix], check=True)
     subprocess.run(
         ["xinput", "set-prop", f"{TOUCH} Stylus", "libinput Calibration Matrix", *matrix],
         check=False,
     )
-    print(f"Rotation de l’écran et du tactile → {rotation}", flush=True)
+    state = Path(GLib.get_user_runtime_dir()) / "t305ca-display-rotation"
+    temporary = state.with_suffix(".tmp")
+    temporary.write_text(rotation + "\n")
+    temporary.replace(state)
+    print(f"Rotation de l’écran et du tactile → {rotation} ({(monotonic() - started) * 1000:.0f} ms)", flush=True)
 
 
 def main():
@@ -123,6 +126,7 @@ def main():
         "net.hadess.SensorProxy", "/net/hadess/SensorProxy", "net.hadess.SensorProxy", None,
     )
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    onboard_auto_show = Gio.Settings.new("org.onboard.auto-show")
     keyboard = None
     home = None
     tablet = False
@@ -133,12 +137,61 @@ def main():
     claimed_by = None
     orientation = "normal"
     state = Path(GLib.get_user_runtime_dir()) / "t305ca-display-rotation"
+    rotation_lock = state.with_name("t305ca-rotation-locked")
+    drawing_mode = state.with_name("t305ca-mode-dessin")
+    reading_mode = state.with_name("t305ca-mode-lecture")
+    backlight = Path("/sys/class/backlight/intel_backlight")
+    reading_previous = None
+    restore_orientation = None
+    touch_disabled = False
     state.unlink(missing_ok=True)
 
+    def update_drawing_mode(detached):
+        nonlocal touch_disabled
+        if not detached:
+            drawing_mode.unlink(missing_ok=True)
+        wanted = drawing_mode.exists()
+        if wanted != touch_disabled:
+            subprocess.run(["xinput", "disable" if wanted else "enable", TOUCH], check=True)
+            touch_disabled = wanted
+
+    def set_reading_brightness(value):
+        bus_system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        bus_system.call_sync(
+            "org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
+            "org.freedesktop.login1.Session", "SetBrightness",
+            GLib.Variant("(ssu)", ("backlight", backlight.name, value)),
+            None, Gio.DBusCallFlags.NONE, 3000, None,
+        )
+
+    def update_reading_mode(detached):
+        nonlocal reading_previous, restore_orientation
+        if not detached or drawing_mode.exists():
+            reading_mode.unlink(missing_ok=True)
+        if reading_mode.exists() and reading_previous is None:
+            current = int((backlight / "brightness").read_text())
+            maximum = int((backlight / "max_brightness").read_text())
+            set_reading_brightness(min(current, round(maximum * 0.25)))
+            reading_previous = (orientation, current)
+        elif not reading_mode.exists() and reading_previous is not None:
+            previous_orientation, previous_brightness = reading_previous
+            set_reading_brightness(previous_brightness)
+            restore_orientation = previous_orientation if detached else "normal"
+            reading_previous = None
+
     def refresh_orientation():
-        nonlocal orientation
+        nonlocal orientation, restore_orientation
         reading = sensor.get_cached_property("AccelerometerOrientation")
-        wanted = reading.unpack() if tablet and reading is not None else "normal"
+        if tablet and reading_previous is not None:
+            wanted = "right-up" if reading and reading.unpack() == "right-up" else "left-up"
+            if orientation in ("left-up", "right-up"):
+                wanted = orientation
+        elif restore_orientation is not None:
+            wanted = restore_orientation
+        elif tablet and (rotation_lock.exists() or drawing_mode.exists()):
+            return
+        else:
+            wanted = reading.unpack() if tablet and reading is not None else "normal"
         if wanted in ROTATIONS and wanted != orientation:
             try:
                 apply_orientation(wanted)
@@ -146,6 +199,8 @@ def main():
                 print(error, flush=True)
             else:
                 orientation = wanted
+        if wanted == orientation:
+            restore_orientation = None
 
     def orientation_changed(_, changed, invalidated):
         if tablet and "AccelerometerOrientation" in changed.unpack():
@@ -163,7 +218,13 @@ def main():
             if now - keyboard_changed_at < DOCK_SETTLE_US:
                 return GLib.SOURCE_CONTINUE
             detached = not ready
+            update_reading_mode(detached)
+            update_drawing_mode(detached)
             if detached != panel_tablet:
+                onboard_auto_show.set_boolean("enabled", detached)
+                Gio.Settings.sync()
+                if not detached:
+                    rotation_lock.unlink(missing_ok=True)
                 apply_panel(detached)
                 panel_tablet = detached
 
@@ -227,7 +288,15 @@ def main():
     GLib.io_add_watch(monitor.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, dock_changed)
     dock_changed()
     GLib.timeout_add_seconds(2, update)
-    GLib.MainLoop().run()
+    loop = GLib.MainLoop()
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, loop.quit)
+    try:
+        loop.run()
+    finally:
+        try:
+            update_reading_mode(False)
+        finally:
+            update_drawing_mode(False)
 
 
 if __name__ == "__main__":

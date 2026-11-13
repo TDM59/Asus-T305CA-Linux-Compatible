@@ -1,0 +1,12 @@
+[Unit]
+Description=Activer le capteur de luminosité de l’ASUS T305CA
+ConditionPathExists=/lib/modules/%v/updates/t305ca/t305ca-als.ko
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/modprobe t305ca_als
+ExecStop=/usr/sbin/modprobe -r t305ca_als
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

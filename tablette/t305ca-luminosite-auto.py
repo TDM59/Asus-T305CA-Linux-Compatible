@@ -9,6 +9,7 @@ from gi.repository import Gio, GLib
 BACKLIGHT = Path("/sys/class/backlight/intel_backlight")
 SENSOR_DRIVER = Path("/sys/module/t305ca_als")
 LID_STATE = Path("/proc/acpi/button/lid/LID/state")
+READING_MODE = Path(GLib.get_user_runtime_dir()) / "t305ca-mode-lecture"
 # Lux ambiants et pourcentage de rétroéclairage, avec un plancher lisible.
 CURVE = ((0, 10), (15, 20), (50, 27), (200, 42), (600, 63), (1500, 82), (3500, 100))
 STEP_PERCENT = 3
@@ -49,6 +50,8 @@ def run():
     while True:
         sleep(1)
         try:
+            if READING_MODE.exists():
+                continue
             if not SENSOR_DRIVER.is_dir() or LID_STATE.read_text().split()[-1] == "closed":
                 readings.clear()
                 target = last_written = last_percent = None

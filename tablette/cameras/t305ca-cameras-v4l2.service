@@ -1,0 +1,19 @@
+[Unit]
+Description=Caméras ASUS T305CA orientées à la demande
+ConditionPathExists=/dev/video60
+ConditionPathExists=/dev/video61
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Environment=GST_PLUGIN_PATH=%h/.local/lib/t305ca/cheese/gstreamer-1.0
+Environment=LD_LIBRARY_PATH=/opt/t305ca-libcamera/lib
+Environment=LIBCAMERA_IPA_MODULE_PATH=/opt/t305ca-libcamera/ipa
+Environment=LIBCAMERA_IPA_CONFIG_PATH=%h/.local/lib/t305ca/cheese/profils
+Environment="LD_PRELOAD=/usr/local/lib/t305ca-camera-avant/libcamera-mire.so /opt/t305ca-libcamera/lib/libcamera.so.0.2"
+ExecStart=/usr/bin/python3 %h/.local/lib/t305ca/t305ca-cameras-v4l2.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+case "${1-}" in
+    --avant) camera=avant; shift ;;
+    --arriere) camera=arriere; shift ;;
+    *)
+        case "$(gsettings get org.gnome.Cheese camera)" in
+            *CAM3*|*"ASUS Avant (rotation)"*) camera=avant ;;
+            *CAM6*|*"ASUS Arriere (rotation)"*) camera=arriere ;;
+            *) camera= ;;
+        esac
+        ;;
+esac
+
+if [ -c /dev/video60 ] && [ -c /dev/video61 ] &&
+    systemctl --user is-active --quiet t305ca-cameras-v4l2.service; then
+    case "$camera" in
+        avant) set -- '--device=ASUS Avant (rotation)' "$@" ;;
+        arriere|'') set -- '--device=ASUS Arriere (rotation)' "$@" ;;
+    esac
+    exec /usr/bin/cheese "$@"
+fi
+
+lib="$HOME/.local/lib/t305ca/cheese"
+export GST_PLUGIN_PATH="$lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+export LD_LIBRARY_PATH="/opt/t305ca-libcamera/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBCAMERA_IPA_MODULE_PATH=/opt/t305ca-libcamera/ipa
+export LIBCAMERA_IPA_CONFIG_PATH="$lib/profils"
+export LD_PRELOAD="$lib/cheese-cadence.so /usr/local/lib/t305ca-camera-avant/libcamera-mire.so /opt/t305ca-libcamera/lib/libcamera.so.0.2${LD_PRELOAD:+ $LD_PRELOAD}"
+case "$camera" in
+    avant) set -- '--device=\_SB_.PCI0.CAM3' "$@" ;;
+    arriere) set -- '--device=\_SB_.PCI0.CAM6' "$@" ;;
+esac
+exec /usr/bin/cheese "$@"

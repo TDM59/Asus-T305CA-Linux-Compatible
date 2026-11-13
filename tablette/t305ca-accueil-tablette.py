@@ -1,8 +1,11 @@
 #!/usr/bin/python3
+import json
 import os
 from pathlib import Path
 import signal
 import subprocess
+from threading import Thread
+import unicodedata
 from datetime import datetime
 
 import cairo
@@ -22,6 +25,13 @@ FAVORITES = (
     ("t305ca-dessin-stylet.desktop", "Dessin", "applications-graphics"),
     ("xfce-settings-manager.desktop", "Paramètres", "preferences-system"),
 )
+ROTATION_LOCK = Path(GLib.get_user_runtime_dir()) / "t305ca-rotation-locked"
+DRAWING_MODE = ROTATION_LOCK.with_name("t305ca-mode-dessin")
+READING_MODE = ROTATION_LOCK.with_name("t305ca-mode-lecture")
+FAVORITES_FILE = Path(GLib.get_user_config_dir()) / "t305ca" / "favoris-tablette.json"
+MAX_FAVORITES = 6
+QUICK_SETTINGS_WIDTH = 700
+QUICK_SETTINGS_SIDE_MARGIN = 24
 
 APP_DOMAINS = (
     ("Internet et réseau", {"Network"}),
@@ -58,6 +68,7 @@ STYLE = b"""
 .hint { color: #dbefeb; }
 .app-domain { font-size: 21px; font-weight: 600; }
 .connection-name { font-size: 0.88em; color: #cae3df; }
+.favorites-dock { background-color: rgba(16, 38, 45, 0.88); border-radius: 24px; padding: 8px; }
 """
 
 
@@ -95,7 +106,10 @@ class Tablet:
         self.shade.connect("delete-event", self.hide_shade)
         self.shade.connect("key-press-event", self.escape_shade)
         self.shade.connect("focus-out-event", self.shade_lost_focus)
-        self.shade.set_default_size(450, -1)
+        self.shade.connect("show", self.start_connection_refresh)
+        self.shade.connect("hide", self.stop_connection_refresh)
+        self.connection_timer = 0
+        self.connection_refresh_running = False
         self.last_workarea = None
         self.window_history = []
         self.portrait_maximized = set()
@@ -112,12 +126,12 @@ class Tablet:
         self.position_edges()
         self.wm.connect("active-window-changed", self.active_window_changed)
         self.wm.connect("window-closed", self.window_closed)
+        self.wm.connect("window-opened", self.screen_changed)
         self.active_window_changed(self.wm, None)
         Gdk.Screen.get_default().connect("size-changed", self.screen_changed)
         Gdk.Screen.get_default().connect("monitors-changed", self.screen_changed)
         GLib.timeout_add(250, self.position_edges)
-        GLib.timeout_add_seconds(10, self.update_clock)
-        GLib.timeout_add_seconds(3, self.refresh_visible_connections)
+        GLib.timeout_add_seconds(30, self.update_clock)
 
     def window(self, title, style):
         window = Gtk.Window(title=title)
@@ -143,28 +157,35 @@ class Tablet:
         overlay.add_overlay(self.pages)
         self.home.add(overlay)
 
-        front = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=22, margin=24)
-        front.set_halign(Gtk.Align.CENTER)
-        front.set_valign(Gtk.Align.CENTER)
+        front = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=24)
+        center = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=22,
+                         halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
         self.clock = label("", "clock")
-        front.pack_start(self.clock, False, False, 0)
-        front.pack_start(label("Accueil tablette", "title"), False, False, 0)
-        favorites = Gtk.Grid(column_spacing=12, row_spacing=12, column_homogeneous=True)
-        for i, (app_id, name, icon) in enumerate(FAVORITES):
-            app = Gio.DesktopAppInfo.new(app_id)
-            if app:
-                favorites.attach(self.app_button(app, name, icon), i % 3, i // 3, 1, 1)
-        front.pack_start(favorites, False, False, 0)
-        front.pack_start(button("Toutes les applications  ↑", self.show_apps), False, False, 0)
+        center.pack_start(self.clock, False, False, 0)
+        center.pack_start(button("Toutes les applications  ↑", self.show_apps), False, False, 0)
+        front.pack_start(center, True, True, 0)
+        self.favorites_dock = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_bottom=38)
+        self.favorites_dock.get_style_context().add_class("favorites-dock")
+        front.pack_end(self.favorites_dock, False, False, 0)
+        self.favorites_editor = None
+        self.favorite_ids = self.read_favorites()
+        self.render_favorites()
         self.pages.add_named(front, "home")
 
         apps_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=30)
         apps_page.pack_start(button("←  Accueil", self.show_home), False, False, 0)
+        self.app_search = Gtk.SearchEntry(placeholder_text="Rechercher une application")
+        self.app_search.connect("search-changed", self.filter_apps)
+        apps_page.pack_start(self.app_search, False, False, 0)
+        self.app_sections = []
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_kinetic_scrolling(True)
         self.apps_scroller = scroller
         apps_page.pack_start(scroller, True, True, 0)
+        self.no_apps = label("Aucune application trouvée")
+        self.no_apps.set_no_show_all(True)
+        apps_page.pack_start(self.no_apps, False, False, 0)
         self.pages.add_named(apps_page, "apps")
 
         recent_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin=30)
@@ -180,6 +201,100 @@ class Tablet:
         gesture.connect("drag-end", self.home_drag)
         self.home.tablet_swipe = gesture
         self.update_clock()
+
+    def read_favorites(self):
+        try:
+            saved = json.loads(FAVORITES_FILE.read_text())
+            if isinstance(saved, list) and all(isinstance(item, str) for item in saved):
+                return list(dict.fromkeys(saved))[:MAX_FAVORITES]
+        except (OSError, ValueError):
+            pass
+        return [app_id for app_id, _, _ in FAVORITES if Gio.DesktopAppInfo.new(app_id)]
+
+    def render_favorites(self):
+        for child in self.favorites_dock.get_children():
+            child.destroy()
+        for app_id in self.favorite_ids:
+            app = Gio.DesktopAppInfo.new(app_id)
+            if not app:
+                continue
+            name = app.get_display_name()
+            control = Gtk.Button()
+            icon = app.get_icon() or Gio.ThemedIcon.new("application-x-executable")
+            picture = Gtk.Image.new_from_gicon(icon, Gtk.IconSize.DIALOG)
+            picture.set_pixel_size(30)
+            control.add(picture)
+            control.set_tooltip_text(name)
+            control.get_accessible().set_name(name)
+            control.connect("clicked", lambda _, target=app: self.launch(target))
+            self.favorites_dock.pack_start(control, False, False, 0)
+        self.favorites_dock.show_all()
+
+    def show_favorites_editor(self, *_):
+        if self.favorites_editor is not None:
+            self.favorites_editor.destroy()
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=30)
+        self.favorites_editor = page
+        selected = [item for item in self.favorite_ids if Gio.DesktopAppInfo.new(item)]
+        heading = label("", "app-domain")
+        page.pack_start(heading, False, False, 0)
+        search = Gtk.SearchEntry(placeholder_text="Rechercher une application")
+        page.pack_start(search, False, False, 0)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_kinetic_scrolling(True)
+        items = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        scroller.add(items)
+        page.pack_start(scroller, True, True, 0)
+        status = label("")
+        page.pack_start(status, False, False, 0)
+        controls = Gtk.Box(spacing=10, homogeneous=True, margin_bottom=38)
+        controls.pack_start(button("Annuler", self.show_home), True, True, 0)
+        page.pack_end(controls, False, False, 0)
+
+        def update_count():
+            heading.set_text(f"Favoris · {len(selected)}/{MAX_FAVORITES}")
+
+        def toggle(control, app_id):
+            if not control.get_active():
+                if app_id in selected:
+                    selected.remove(app_id)
+            elif len(selected) < MAX_FAVORITES:
+                selected.append(app_id)
+            else:
+                control.set_active(False)
+                status.set_text("Décoche un favori pour libérer une place.")
+                return
+            status.set_text("")
+            update_count()
+
+        def save(*_):
+            try:
+                FAVORITES_FILE.parent.mkdir(parents=True, exist_ok=True)
+                temporary = FAVORITES_FILE.with_suffix(".tmp")
+                temporary.write_text(json.dumps(selected) + "\n")
+                temporary.replace(FAVORITES_FILE)
+            except OSError as error:
+                status.set_text(str(error))
+                return
+            self.favorite_ids = selected
+            self.render_favorites()
+            self.show_home()
+
+        controls.pack_start(button("Enregistrer", save), True, True, 0)
+        apps = {app.get_id(): app.get_display_name() for app in Gio.AppInfo.get_all()
+                if app.get_id() and (app.should_show() or app.get_id() in selected)}
+        for app_id, name in sorted(apps.items(), key=lambda item: item[1].casefold()):
+            control = Gtk.CheckButton(label=name, active=app_id in selected)
+            control.set_size_request(-1, 42)
+            control.connect("toggled", toggle, app_id)
+            items.add(control)
+        items.set_filter_func(lambda row: search.get_text().casefold() in
+                              row.get_child().get_label().casefold())
+        search.connect("search-changed", lambda *_: items.invalidate_filter())
+        update_count()
+        self.pages.add_named(page, "favorites")
+        self.present_page("favorites")
 
     def build_app_domains(self):
         sections = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -203,11 +318,34 @@ class Tablet:
             apps = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                                min_children_per_line=2, max_children_per_line=6,
                                row_spacing=10, column_spacing=10)
+            matches = []
             for app in sorted(entries, key=lambda entry: entry.get_display_name().casefold()):
-                apps.add(self.app_button(app, app.get_display_name()))
+                name = app.get_display_name()
+                apps.add(self.app_button(app, name))
+                matches.append((apps.get_child_at_index(len(matches)),
+                                self.search_key(f"{name} {domain}")))
+            self.app_sections.append((section, matches))
             section.pack_start(apps, False, False, 0)
             sections.pack_start(section, False, False, 0)
         return sections
+
+    @staticmethod
+    def search_key(text):
+        return "".join(char for char in unicodedata.normalize("NFD", text.casefold())
+                       if not unicodedata.combining(char))
+
+    def filter_apps(self, *_):
+        terms = self.search_key(self.app_search.get_text()).split()
+        found = False
+        for section, entries in self.app_sections:
+            visible = False
+            for tile, key in entries:
+                match = all(term in key for term in terms)
+                tile.set_visible(match)
+                visible |= match
+            section.set_visible(visible)
+            found |= visible
+        self.no_apps.set_visible(not found)
 
     def draw_wallpaper(self, widget, cr, picture):
         width, height = widget.get_allocated_width(), widget.get_allocated_height()
@@ -276,6 +414,7 @@ class Tablet:
                 self.show_home()
 
     def window_closed(self, screen, window):
+        self.screen_changed()
         xid = window.get_xid()
         self.portrait_maximized.discard(xid)
         if xid in self.window_history:
@@ -285,6 +424,8 @@ class Tablet:
 
     def present_page(self, page):
         self.shade.hide()
+        if page == "home":
+            self.update_clock()
         self.home.show_all()
         self.pages.set_visible_child_name(page)
         self.home.maximize()
@@ -349,6 +490,8 @@ class Tablet:
             self.apps_scroller.add(self.build_app_domains())
             self.apps_scroller.show_all()
         self.pages.set_visible_child_name("apps")
+        self.app_search.set_text("")
+        self.filter_apps()
 
     def home_drag(self, gesture, x, y):
         if abs(y) < 34 or abs(y) <= abs(x):
@@ -497,7 +640,7 @@ class Tablet:
     def schedule_fit(self):
         if self.fit_pending:
             GLib.source_remove(self.fit_pending)
-        self.fit_pending = GLib.timeout_add(230, self.fit_active_window)
+        self.fit_pending = GLib.timeout_add(65, self.fit_active_window)
 
     def restore_window_sizes(self, resized=None):
         if resized is None:
@@ -573,17 +716,27 @@ class Tablet:
         self.shade.add(box)
         box.pack_start(label("Réglages rapides", "title"), False, False, 0)
         row = Gtk.Grid(row_spacing=10, column_spacing=10, column_homogeneous=True)
+        self.quick_grid = row
+        self.quick_columns = 0
         self.wifi, self.wifi_connection = self.connection_button("Wi-Fi", self.toggle_wifi)
         self.bluetooth, self.bluetooth_connection = self.connection_button(
             "Bluetooth", self.toggle_bluetooth)
-        for i, item in enumerate((self.wifi, self.bluetooth,
+        self.rotation, self.rotation_status = self.connection_button("Rotation", self.toggle_rotation)
+        self.drawing, self.drawing_status = self.connection_button("Mode dessin", self.toggle_drawing)
+        self.reading, self.reading_status = self.connection_button("Mode lecture", self.toggle_reading)
+        self.power_profile, self.power_status = self.connection_button(
+            "Profil batterie", self.toggle_power_profile)
+        self.quick_buttons = (self.wifi, self.bluetooth,
                                   button("Couper / rétablir le son", lambda *_: self.command(
                                       "pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle")),
                                   button("Clavier à l’écran", self.keyboard),
                                   button("Lumière nocturne", lambda *_: self.command(
                                       "pkill", "-USR1", "-u", str(os.getuid()), "-x", "redshift")),
-                                  button("Paramètres Mint", self.open_settings))):
-            row.attach(item, i % 2, i // 2, 1, 1)
+                                  button("Paramètres Mint", self.open_settings),
+                                  self.rotation,
+                                  button("Modifier les favoris", self.show_favorites_editor),
+                                  self.power_profile, self.drawing, self.reading)
+        self.layout_quick_buttons(3)
         box.pack_start(row, False, False, 0)
         self.brightness = self.slider(box, "Luminosité", 10, 100, self.set_brightness)
         self.volume = self.slider(box, "Volume", 0, 100, self.set_volume)
@@ -592,6 +745,15 @@ class Tablet:
         box.pack_start(self.status, False, False, 0)
         box.pack_start(button("Fermer  ↑", self.hide_shade), False, False, 0)
         self.swipe(self.shade, -1, self.hide_shade)
+
+    def layout_quick_buttons(self, columns):
+        if columns == self.quick_columns:
+            return
+        for index, item in enumerate(self.quick_buttons):
+            if item.get_parent() is not None:
+                self.quick_grid.remove(item)
+            self.quick_grid.attach(item, index % columns, index // columns, 1, 1)
+        self.quick_columns = columns
 
     def slider(self, box, title, minimum, maximum, callback):
         box.pack_start(label(title), False, False, 0)
@@ -615,6 +777,12 @@ class Tablet:
         return widget, status
 
     def refresh_connections(self):
+        if self.connection_refresh_running:
+            return
+        self.connection_refresh_running = True
+        Thread(target=self.read_connections, daemon=True).start()
+
+    def read_connections(self):
         wifi = read_command("nmcli", "radio", "wifi")
         bluetooth = read_command("bluetoothctl", "show")
         wifi_name = ""
@@ -631,19 +799,34 @@ class Tablet:
                     devices.append(fields[2])
         wifi_status = wifi_name or ("Non connecté" if wifi == "enabled" else "Désactivé")
         bluetooth_status = " · ".join(devices) or ("Non connecté" if bluetooth_enabled else "Désactivé")
+        GLib.idle_add(self.show_connections, wifi_status, bluetooth_status, bool(wifi), bool(bluetooth))
+
+    def show_connections(self, wifi_status, bluetooth_status, wifi_available, bluetooth_available):
+        self.connection_refresh_running = False
         self.wifi_connection.set_text(wifi_status)
         self.wifi.set_tooltip_text(wifi_status)
         self.bluetooth_connection.set_text(bluetooth_status)
         self.bluetooth.set_tooltip_text(bluetooth_status)
-        self.wifi.set_sensitive(bool(wifi))
-        self.bluetooth.set_sensitive(bool(bluetooth))
+        self.wifi.set_sensitive(wifi_available)
+        self.bluetooth.set_sensitive(bluetooth_available)
+        return GLib.SOURCE_REMOVE
+
+    def start_connection_refresh(self, *_):
+        if not self.connection_timer:
+            self.connection_timer = GLib.timeout_add_seconds(3, self.refresh_visible_connections)
+
+    def stop_connection_refresh(self, *_):
+        if self.connection_timer:
+            GLib.source_remove(self.connection_timer)
+            self.connection_timer = 0
 
     def refresh_visible_connections(self):
-        if self.shade.get_visible():
-            self.refresh_connections()
+        self.refresh_connections()
         return GLib.SOURCE_CONTINUE
 
     def refresh(self):
+        self.refresh_power_profile()
+        self.refresh_rotation()
         self.refresh_connections()
         self.status.set_text("")
         try:
@@ -664,9 +847,64 @@ class Tablet:
         widget.set_value(value)
         widget.handler_unblock(handler)
 
+    def refresh_power_profile(self):
+        profile = read_command("powerprofilesctl", "get")
+        names = {"balanced": "Équilibré", "power-saver": "Économie", "performance": "Performance"}
+        self.power_status.set_text(names.get(profile, "Indisponible"))
+        self.power_profile.set_sensitive(profile in names)
+
+    def toggle_power_profile(self, *_):
+        profile = read_command("powerprofilesctl", "get")
+        if profile:
+            target = "balanced" if profile == "power-saver" else "power-saver"
+            self.command("powerprofilesctl", "set", target, refresh=True)
+
+    def refresh_rotation(self):
+        drawing = DRAWING_MODE.exists()
+        reading = READING_MODE.exists()
+        self.rotation_status.set_text("Verrouillée" if drawing or reading or ROTATION_LOCK.exists() else "Automatique")
+        self.rotation.set_sensitive(not (drawing or reading))
+        self.drawing.set_sensitive(not reading)
+        self.reading.set_sensitive(not drawing)
+        self.drawing_status.set_text("Actif · stylet seul" if drawing else "Désactivé")
+        self.reading_status.set_text("Actif · portrait" if reading else "Désactivé")
+
+    def toggle_reading(self, *_):
+        try:
+            if READING_MODE.exists():
+                READING_MODE.unlink()
+            elif not DRAWING_MODE.exists():
+                READING_MODE.touch()
+        except OSError as error:
+            self.status.set_text(str(error))
+        self.refresh_rotation()
+
+    def toggle_drawing(self, *_):
+        try:
+            if DRAWING_MODE.exists():
+                DRAWING_MODE.unlink(missing_ok=True)
+            else:
+                DRAWING_MODE.touch()
+        except OSError as error:
+            self.status.set_text(str(error))
+        self.refresh_rotation()
+
+    def toggle_rotation(self, *_):
+        try:
+            if ROTATION_LOCK.exists():
+                ROTATION_LOCK.unlink(missing_ok=True)
+            else:
+                ROTATION_LOCK.touch()
+        except OSError as error:
+            self.status.set_text(str(error))
+        self.refresh_rotation()
+
     def position_shade(self):
         x, y, width, _ = self.last_workarea
-        shade_width = self.shade.get_size()[0]
+        shade_width = min(QUICK_SETTINGS_WIDTH, max(1, width - 2 * QUICK_SETTINGS_SIDE_MARGIN))
+        self.layout_quick_buttons(3 if shade_width >= 640 else 2)
+        _, height = self.shade.get_child().get_preferred_height_for_width(shade_width)
+        self.shade.resize(shade_width, max(1, height))
         self.shade.move(x + max(0, (width - shade_width) // 2), y + self.top.get_size()[1] + 8)
 
     def show_shade(self, *_):
@@ -735,7 +973,7 @@ class Tablet:
         self.shade.hide()
         self.session_bus.call("org.onboard.Onboard", "/org/onboard/Onboard/Keyboard",
                               "org.onboard.Onboard.Keyboard", "Show", None, None,
-                              Gio.DBusCallFlags.NONE, 1500, None, None)
+                              Gio.DBusCallFlags.NO_AUTO_START, 1500, None, None)
 
 
 if __name__ == "__main__":

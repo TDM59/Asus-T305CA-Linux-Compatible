@@ -9,7 +9,7 @@ config="${XDG_CONFIG_HOME:-$HOME/.config}"
 install -d "$HOME/.local/lib/t305ca" "$config/systemd/user" "$config/autostart"
 install -m 644 t305ca-*.py "$HOME/.local/lib/t305ca/"
 install -m 644 t305ca-*.service "$config/systemd/user/"
-install -m 644 t305ca-mode-tablette.desktop "$config/autostart/"
+install -m 644 t305ca-mode-tablette.desktop onboard-autostart.desktop "$config/autostart/"
 systemctl --user daemon-reload
 systemctl --user restart t305ca-mode-tablette.service
 if [ "${1:-}" = --luminosite-auto ]; then
